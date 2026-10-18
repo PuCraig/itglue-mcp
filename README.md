@@ -56,7 +56,8 @@ Copy [`.env.example`](.env.example) and set the variables below. Leave `CONDUIT_
 | `MCP_HTTP_HOST` | Bind address when a real `CONDUIT_S2S_SECRET` is set. Unset keeps `0.0.0.0`, the historical container bind. The image and Compose set `0.0.0.0` inside the container. | No |
 | `AUTH_MODE` | `env` (read credentials from environment; image default) or `gateway` (read per-request credentials from HTTP headers; Compose default). Gateway mode never falls back to `ITGLUE_*`. | No |
 | `CONDUIT_S2S_SECRET` | Service-to-service secret for HTTP. The process logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `secret`, `replace-me`, `your-s2s-secret`, and the other example values). Generate one with `openssl rand -hex 32`. Compose will not start without it. The value is never logged. | Yes for HTTP |
-| `MCP_ALLOW_INSECURE_DEV` | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` refuses to start. A known placeholder secret still refuses to start. | No |
+| `MCP_ALLOW_INSECURE_DEV` | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` refuses to start unless `MCP_ALLOW_INSECURE_BIND=1` is also set. A known placeholder secret still refuses to start. | No |
+| `MCP_ALLOW_INSECURE_BIND` | Set to exactly `1` (with `MCP_ALLOW_INSECURE_DEV=1`) to allow a non-loopback `MCP_HTTP_HOST` while `X-Gateway-S2S` is not enforced — e.g. Docker Desktop port mappings (unset defaults the bind to `0.0.0.0`). The endpoint is then unauthenticated on every interface; do not expose it publicly. No effect without `MCP_ALLOW_INSECURE_DEV=1`. | No |
 
 `/health` and `/healthz` stay unauthenticated and do not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
 
@@ -341,6 +342,20 @@ Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a
 MCP_TRANSPORT=http MCP_HTTP_HOST=127.0.0.1 MCP_ALLOW_INSECURE_DEV=1 \
   npx @wyre-ai/itglue-mcp
 ```
+
+To run the unauthenticated server behind a Docker Desktop port mapping, add
+`MCP_ALLOW_INSECURE_BIND=1` to honor a non-loopback `MCP_HTTP_HOST`:
+
+```bash
+docker run -p 8080:8080 \
+  -e MCP_TRANSPORT=http -e AUTH_MODE=env \
+  -e MCP_ALLOW_INSECURE_DEV=1 -e MCP_ALLOW_INSECURE_BIND=1 \
+  -e ITGLUE_API_KEY="ITG.xxxxxxxx" \
+  ghcr.io/wyre-ai/itglue-mcp:latest
+```
+
+The `/mcp` endpoint is then reachable from every interface with **no**
+authentication — keep the port mapping local or firewalled.
 
 ## Example Queries
 

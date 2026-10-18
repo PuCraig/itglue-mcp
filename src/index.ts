@@ -13,8 +13,11 @@
  * secret. Known placeholders are rejected. MCP_ALLOW_INSECURE_DEV=1 is a
  * local-only escape hatch for an empty secret: it logs a warning, does not
  * enforce X-Gateway-S2S, and binds 127.0.0.1. A non-loopback MCP_HTTP_HOST
- * is refused in that mode. A configured secret honors MCP_HTTP_HOST; when
- * that variable is unset the process keeps the historical 0.0.0.0 bind.
+ * is refused in that mode unless MCP_ALLOW_INSECURE_BIND=1 is also set, which
+ * opts in to a non-loopback bind without S2S auth (container use, e.g. Docker
+ * Desktop port mappings); it honors MCP_HTTP_HOST and defaults to 0.0.0.0. A
+ * configured secret honors MCP_HTTP_HOST; when that variable is unset the
+ * process keeps the historical 0.0.0.0 bind.
  * Gateway mode never falls back to ITGLUE_* env credentials.
  * /health and /healthz stay unauthenticated and do not read credentials.
  * stdio does not use S2S auth.
@@ -61,10 +64,18 @@ const PLACEHOLDER_S2S_SECRET_ERROR =
   "Refusing to start HTTP transport: CONDUIT_S2S_SECRET is a known placeholder. " +
   "Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value.";
 
-const INSECURE_DEV_WARNING =
-  "SECURITY WARNING: CONDUIT_S2S_SECRET is empty and MCP_ALLOW_INSECURE_DEV=1. " +
-  "HTTP /mcp is starting with service-to-service authentication DISABLED, bound to 127.0.0.1 only. " +
-  "Local development only; do not expose this port.";
+function insecureDevWarning(host: string): string {
+  const head =
+    "SECURITY WARNING: CONDUIT_S2S_SECRET is empty and MCP_ALLOW_INSECURE_DEV=1. " +
+    "HTTP /mcp is starting with service-to-service authentication DISABLED, ";
+  return isLoopbackBindHost(host)
+    ? head + "bound to 127.0.0.1 only. Local development only; do not expose this port."
+    : head +
+        `bound to ${host} (all interfaces) because MCP_ALLOW_INSECURE_BIND=1. ` +
+        "HTTP /mcp is reachable from every interface of this host/container and has no S2S " +
+        "authentication. Intended for trusted private networks or a local Docker Desktop port " +
+        "mapping; do not expose this port publicly.";
+}
 
 const S2S_UNAUTHORIZED = {
   error:
@@ -111,12 +122,18 @@ function resolveS2sSecret(env: NodeJS.ProcessEnv = process.env): { secret: strin
 
 /**
  * No real secret: force 127.0.0.1. A non-loopback MCP_HTTP_HOST refuses to
- * start and is logged. A real secret honors MCP_HTTP_HOST; unset stays
- * 0.0.0.0 so existing container deploys keep their bind.
+ * start and is logged, unless MCP_ALLOW_INSECURE_BIND=1 is also set — that
+ * opt-in honors MCP_HTTP_HOST anyway (unset defaults to 0.0.0.0) so the
+ * unauthenticated server can serve through a container port mapping. A real
+ * secret honors MCP_HTTP_HOST; unset stays 0.0.0.0 so existing container
+ * deploys keep their bind.
  */
 function resolveBindHost(insecureDev: boolean, env: NodeJS.ProcessEnv = process.env): string {
   const configured = (env.MCP_HTTP_HOST ?? "").trim();
   if (!insecureDev) {
+    return configured || "0.0.0.0";
+  }
+  if (env.MCP_ALLOW_INSECURE_BIND === "1") {
     return configured || "0.0.0.0";
   }
   if (configured === "" || isLoopbackBindHost(configured)) {
@@ -125,7 +142,8 @@ function resolveBindHost(insecureDev: boolean, env: NodeJS.ProcessEnv = process.
   refuseStart(
     `Refusing to start HTTP transport: MCP_ALLOW_INSECURE_DEV=1 without CONDUIT_S2S_SECRET ` +
       `only listens on ${LOOPBACK_HOST}. MCP_HTTP_HOST=${configured} is not loopback. ` +
-      `Unset MCP_HTTP_HOST or set it to ${LOOPBACK_HOST}.`,
+      `Unset MCP_HTTP_HOST, set it to ${LOOPBACK_HOST}, ` +
+      `or set MCP_ALLOW_INSECURE_BIND=1 to allow this bind.`,
   );
 }
 
@@ -189,9 +207,9 @@ export async function startHttpTransport(): Promise<HttpServer> {
   const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
   const host = resolveBindHost(insecureDev);
   if (insecureDev) {
-    // Logged only after the loopback bind is accepted, so a refused
-    // non-loopback host does not claim the server is starting.
-    console.error(INSECURE_DEV_WARNING);
+    // Logged only after the bind is accepted, so a refused non-loopback
+    // host does not claim the server is starting.
+    console.error(insecureDevWarning(host));
   }
   const isGatewayMode = process.env.AUTH_MODE === "gateway";
 

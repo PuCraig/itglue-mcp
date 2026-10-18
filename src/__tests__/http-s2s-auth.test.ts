@@ -24,6 +24,7 @@ const HEADER_API_KEY = "header-api-key-ITG.do-not-log";
 const ENV_KEYS = [
   "CONDUIT_S2S_SECRET",
   "MCP_ALLOW_INSECURE_DEV",
+  "MCP_ALLOW_INSECURE_BIND",
   "MCP_HTTP_PORT",
   "MCP_HTTP_HOST",
   "AUTH_MODE",
@@ -168,6 +169,7 @@ beforeEach(() => {
   process.env.MCP_HTTP_HOST = "127.0.0.1";
   delete process.env.CONDUIT_S2S_SECRET;
   delete process.env.MCP_ALLOW_INSECURE_DEV;
+  delete process.env.MCP_ALLOW_INSECURE_BIND;
   delete process.env.AUTH_MODE;
   delete process.env.ITGLUE_API_KEY;
   delete process.env.ITGLUE_JWT;
@@ -311,6 +313,7 @@ describe("HTTP startup", () => {
         expect(text).toContain("127.0.0.1");
         expect(text).toContain(`MCP_HTTP_HOST=${host}`);
         expect(text).toContain("not loopback");
+        expect(text).toContain("MCP_ALLOW_INSECURE_BIND=1");
         expect(text).not.toContain("SECURITY WARNING");
         expect(text).not.toContain(S2S_SECRET);
       } finally {
@@ -318,6 +321,88 @@ describe("HTTP startup", () => {
       }
     },
   );
+
+  it("binds MCP_HTTP_HOST with the dev bypass when MCP_ALLOW_INSECURE_BIND=1", async () => {
+    process.env.MCP_ALLOW_INSECURE_DEV = "1";
+    process.env.MCP_ALLOW_INSECURE_BIND = "1";
+    process.env.MCP_HTTP_HOST = "0.0.0.0";
+    const logs = captureStderr();
+    const exit = exitSpy();
+
+    try {
+      const server = await listen();
+      expect(exit).not.toHaveBeenCalled();
+      expect(server.address).toBe("0.0.0.0");
+      const text = logs.text();
+      expect(text).toContain("SECURITY WARNING");
+      expect(text).toContain("DISABLED");
+      expect(text).toContain("MCP_ALLOW_INSECURE_BIND=1");
+      expect(text).not.toContain("not loopback");
+      expect(text).not.toContain(S2S_SECRET);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("defaults MCP_ALLOW_INSECURE_BIND=1 to 0.0.0.0 when MCP_HTTP_HOST is unset", async () => {
+    process.env.MCP_ALLOW_INSECURE_DEV = "1";
+    process.env.MCP_ALLOW_INSECURE_BIND = "1";
+    delete process.env.MCP_HTTP_HOST;
+    const logs = captureStderr();
+
+    try {
+      const server = await listen();
+      expect(server.address).toBe("0.0.0.0");
+      expect(logs.text()).toContain("SECURITY WARNING");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("still honors a loopback MCP_HTTP_HOST when MCP_ALLOW_INSECURE_BIND=1 is also set", async () => {
+    process.env.MCP_ALLOW_INSECURE_DEV = "1";
+    process.env.MCP_ALLOW_INSECURE_BIND = "1";
+    process.env.MCP_HTTP_HOST = "127.0.0.1";
+    const logs = captureStderr();
+
+    try {
+      const server = await listen();
+      expect(server.address).toBe("127.0.0.1");
+      expect(logs.text()).not.toContain("MCP_ALLOW_INSECURE_BIND");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("does not treat MCP_ALLOW_INSECURE_BIND alone as the auth bypass", async () => {
+    process.env.MCP_ALLOW_INSECURE_BIND = "1";
+    const logs = captureStderr();
+    const exit = exitSpy();
+
+    try {
+      await expect(startHttpTransport()).rejects.toThrow("process.exit:1");
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(logs.text()).toContain("CONDUIT_S2S_SECRET is empty");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  it("ignores MCP_ALLOW_INSECURE_BIND when it is not exactly 1", async () => {
+    process.env.MCP_ALLOW_INSECURE_DEV = "1";
+    process.env.MCP_ALLOW_INSECURE_BIND = "true";
+    process.env.MCP_HTTP_HOST = "0.0.0.0";
+    const logs = captureStderr();
+    const exit = exitSpy();
+
+    try {
+      await expect(startHttpTransport()).rejects.toThrow("process.exit:1");
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(logs.text()).toContain("not loopback");
+    } finally {
+      logs.restore();
+    }
+  });
 
   it("honors a non-loopback MCP_HTTP_HOST when CONDUIT_S2S_SECRET is set", async () => {
     process.env.CONDUIT_S2S_SECRET = S2S_SECRET;

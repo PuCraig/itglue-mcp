@@ -41,9 +41,11 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Set environment variables for HTTP transport.
 # 0.0.0.0 is the in-container bind. Startup still refuses to listen without a
 # real CONDUIT_S2S_SECRET. MCP_ALLOW_INSECURE_DEV=1 refuses this host and only
-# binds 127.0.0.1. AUTH_MODE=env reads ITGLUE_* from the environment after
-# X-Gateway-S2S verifies; set AUTH_MODE=gateway so credentials come from
-# request headers and never fall back to the process environment.
+# binds 127.0.0.1, unless MCP_ALLOW_INSECURE_BIND=1 also allows the
+# non-loopback bind without S2S auth (trusted networks / Docker Desktop only).
+# AUTH_MODE=env reads ITGLUE_* from the environment after X-Gateway-S2S
+# verifies; set AUTH_MODE=gateway so credentials come from request headers and
+# never fall back to the process environment.
 ENV MCP_TRANSPORT=http
 ENV MCP_HTTP_PORT=8080
 ENV MCP_HTTP_HOST=0.0.0.0
