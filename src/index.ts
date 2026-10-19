@@ -164,6 +164,8 @@ export {
   USER_METRIC_SORT_FIELDS,
   createDocumentWithContent,
   documentBodyOmittedNote,
+  documentsNameNote,
+  documentsSkipServerNameFilter,
   folderedDocumentsIncludedNote,
   listDocumentFoldersViaApiKey,
   nameFallbackNote,

@@ -986,6 +986,47 @@ export function nameFallbackNote(resource: string, name: string, capped: boolean
 }
 
 /**
+ * Advisory attached when `search_documents` matched names client-side.
+ *
+ * Documents need their own wording because the reason differs from the
+ * organizations fallback: for documents we do not even attempt a
+ * server-side `filter[name]` — see {@link documentsSkipServerNameFilter}.
+ */
+export function documentsNameNote(name: string, capped: boolean): string {
+  return (
+    `NOTE: this result comes from a client-side, case-insensitive substring match on the ` +
+    `document name for "${name}". IT Glue's filter[name] is unreliable for documents (it is ` +
+    `dropped entirely when combined with a folder filter, and otherwise matches full-text ` +
+    `content rather than the name), so the listing was fetched without a server-side name ` +
+    `filter and matched here.` +
+    (capped
+      ? ` The underlying listing was capped at ${NAME_FALLBACK_MAX_PAGES * NAME_FALLBACK_PAGE_SIZE} ` +
+        `documents before matching, so there may be further matches beyond that not reflected here.`
+      : "")
+  );
+}
+
+/**
+ * Whether `search_documents` must skip IT Glue's server-side `filter[name]`.
+ *
+ * Verified live 2026-10-19 against the AU-migrated tenant:
+ *   - `filter[name]` alone matches full-text content, not the name (query
+ *     "guide" returned 25 documents whose names do not contain "guide");
+ *   - `filter[name]` + any `filter[document_folder_id]` drops the name filter
+ *     entirely (query returned the org's full 338-document listing).
+ *
+ * The pre-fix handler sent `filter[name]` with the folder-inclusive default
+ * filter and only fell back when the result was empty — a path that can never
+ * fire, since the dropped filter returns every document, so a `name` argument
+ * was silently a no-op. Documents therefore always go through
+ * {@link searchByNameWithFallback}. Other resources (organizations,
+ * configurations, passwords, flexible assets) keep the cheap server-side path.
+ */
+export function documentsSkipServerNameFilter(docName?: string): boolean {
+  return Boolean(docName);
+}
+
+/**
  * Enumerate an organization's document folders using API-key auth.
  *
  * IT Glue's public API now documents a Document Folders resource, but the
@@ -2553,7 +2594,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (docName) filter.name = docName;
+        // Documents' server-side filter[name] is unreliable (dropped when
+        // combined with the folder filter, full-text otherwise) — never send
+        // it; a name query always walks the listing and matches client-side.
+        // See documentsSkipServerNameFilter for the live-verified evidence.
+        if (documentsSkipServerNameFilter(docName)) {
+          // matched client-side below
+        } else if (docName) {
+          filter.name = docName;
+        }
         if (args?.document_folder_id) filter.documentFolderId = args.document_folder_id;
 
         if (Object.keys(filter).length > 0) params.filter = filter;
@@ -2568,7 +2617,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let result: { data: unknown[]; meta: PaginationMeta };
           let note: string | null;
 
-          if (args?.document_folder_id) {
+          // For documents, server-side filter[name] is never sent (see
+          // documentsSkipServerNameFilter): a name query goes straight to the
+          // client-side walk below, skipping a listing fetch whose result
+          // would be discarded.
+          if (docName) {
+            result = { data: [], meta: { currentPage: 1, nextPage: null, prevPage: null, totalPages: 1, totalCount: 0 } };
+            note = null;
+          } else if (args?.document_folder_id) {
             // Explicit folder scope — single request, result is complete for
             // that folder, no caveat needed.
             result = await client.request(
@@ -2594,11 +2650,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 : folderedDocumentsIncludedNote();
           }
 
-          // IT Glue's filter[name] matches documents exactly, not partially.
-          // The query above is the cheap, correct path whenever the caller
-          // already has the exact name; only when it comes back empty do we
-          // fall back to a broader listing matched client-side as a
-          // substring (see searchByNameWithFallback).
+          // Documents' server-side filter[name] is unreliable (dropped when
+          // combined with a folder filter; full-text otherwise), so a name
+          // query arrives here with an empty placeholder result and is always
+          // matched client-side against the listing (searchByNameWithFallback).
           let nameNote: string | null = null;
           if (docName && result.data.length === 0) {
             // Each fallback page re-negotiates the folder filter independently
@@ -2629,7 +2684,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               page
             );
             result = { data: fallback.data, meta: fallback.meta };
-            nameNote = nameFallbackNote("documents", docName, fallback.capped);
+            nameNote = documentsNameNote(docName, fallback.capped);
 
             if (!args?.document_folder_id) {
               note = fallbackAttempts.includes("unfiltered")

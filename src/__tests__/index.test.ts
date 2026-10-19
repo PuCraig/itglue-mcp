@@ -3666,13 +3666,15 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(firstText(result)).toContain("Documents module");
     });
 
-    describe("name fallback (IT Glue's filter[name] is exact-match only)", () => {
-      it("falls back to a client-side substring match when the exact-match query is empty", async () => {
+    describe("name matching (IT Glue's filter[name] is unreliable for documents)", () => {
+      it("walks the listing client-side and never sends filter[name]", async () => {
         const client = await connectClient({ apiKey: "test-api-key" });
         mockFetch
-          // Primary exact-match query (folder-inclusive null-filter attempt): no hit.
-          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
-          // Fallback broad listing (its own null-filter attempt): matched client-side.
+          // Single broad listing (folder-inclusive null-filter attempt),
+          // matched client-side — there is no longer a wasted exact-match
+          // primary query, because combining filter[name] with the folder
+          // filter makes IT Glue silently drop the name filter and return
+          // every document.
           .mockResolvedValueOnce(
             createMockResponse(
               createJsonApiResponse([
@@ -3687,9 +3689,9 @@ describe("Document folder access (API-key-first, round-trip)", () => {
           arguments: { organization_id: 123, name: "change" },
         });
 
-        expect(mockFetch).toHaveBeenCalledTimes(2);
-        expect(decodedUrl(0)).toContain("filter[name]=change");
-        expect(decodedUrl(1)).not.toContain("filter[name]");
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(decodedUrl(0)).not.toContain("filter[name]");
+        expect(decodedUrl(0)).toContain("filter[document_folder_id]=null");
 
         const text = firstText(result);
         expect(text).toContain("client-side, case-insensitive");
@@ -3697,12 +3699,17 @@ describe("Document folder access (API-key-first, round-trip)", () => {
         expect(text).not.toContain("Onboarding Checklist");
       });
 
-      it("does not fall back when the exact-match query already found something", async () => {
+      it("matches even an exact name client-side — no server filter to drop it", async () => {
+        // Regression: pre-fix, an exact name was sent as filter[name] WITH the
+        // folder-inclusive default filter; IT Glue dropped the name filter and
+        // returned the entire listing, and the "only fall back when empty"
+        // guard never fired — so `name` was a silent no-op.
         const client = await connectClient({ apiKey: "test-api-key" });
         mockFetch.mockResolvedValueOnce(
           createMockResponse(
             createJsonApiResponse([
               { id: "1", type: "documents", attributes: { name: "Change Management SOP" } },
+              { id: "2", type: "documents", attributes: { name: "Unrelated Doc" } },
             ])
           )
         );
@@ -3713,13 +3720,17 @@ describe("Document folder access (API-key-first, round-trip)", () => {
         });
 
         expect(mockFetch).toHaveBeenCalledTimes(1);
-        expect(firstText(result)).not.toContain("client-side");
+        expect(decodedUrl(0)).not.toContain("filter[name]");
+        const text = firstText(result);
+        expect(text).toContain("Change Management SOP");
+        // The listing contained a non-matching document; it must be filtered
+        // out client-side, not passed through as a 'found' result.
+        expect(text).not.toContain("Unrelated Doc");
       });
 
-      it("keeps the explicit document_folder_id scope on the fallback request", async () => {
+      it("keeps the explicit document_folder_id scope on the client-side walk", async () => {
         const client = await connectClient({ apiKey: "test-api-key" });
         mockFetch
-          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
           .mockResolvedValueOnce(
             createMockResponse(
               createJsonApiResponse([
@@ -3733,19 +3744,16 @@ describe("Document folder access (API-key-first, round-trip)", () => {
           arguments: { organization_id: 123, document_folder_id: 42, name: "change" },
         });
 
-        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
         expect(decodedUrl(0)).toContain("filter[document-folder-id]=42");
-        expect(decodedUrl(1)).toContain("filter[document-folder-id]=42");
-        expect(decodedUrl(1)).not.toContain("filter[name]");
+        expect(decodedUrl(0)).not.toContain("filter[name]");
       });
 
-      it("shows the ROOT-LEVEL scope note when the fallback itself degrades to unfiltered, even though the primary attempt was folder-inclusive", async () => {
+      it("shows the ROOT-LEVEL scope note when the walk degrades to unfiltered", async () => {
         const client = await connectClient({ apiKey: "test-api-key" });
         mockFetch
-          // Primary query: folder-inclusive null-filter attempt succeeds, but empty.
-          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
-          // Fallback page 1 re-negotiates independently and degrades all the
-          // way down to the legacy root-only listing.
+          // The client-side walk re-negotiates the folder filter per page and
+          // degrades all the way down to the legacy root-only listing.
           .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
           .mockResolvedValueOnce(createErrorResponse(422, "unprocessable"))
           .mockResolvedValueOnce(
@@ -3761,10 +3769,9 @@ describe("Document folder access (API-key-first, round-trip)", () => {
           arguments: { organization_id: 123, name: "change" },
         });
 
-        expect(mockFetch).toHaveBeenCalledTimes(4);
+        expect(mockFetch).toHaveBeenCalledTimes(3);
         const text = firstText(result);
-        // The response reflects the fallback's actual (root-only) scope, not
-        // the primary attempt's folder-inclusive one.
+        // The response reflects the walk's actual (root-only) scope.
         expect(text).toContain("ROOT-LEVEL");
         expect(text).not.toContain("includes documents inside folders");
         expect(text).toContain("Change Log");
